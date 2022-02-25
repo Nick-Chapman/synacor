@@ -27,6 +27,8 @@ dependencies:
 - transformers
 - word8
 - EarleyM
+- MissingH
+- text-latin1
 
 default-extensions:
 - BangPatterns
