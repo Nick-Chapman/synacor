@@ -1,0 +1,3 @@
+# synacor
+
+Synacor Challenge
