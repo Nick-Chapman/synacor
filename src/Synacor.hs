@@ -2,7 +2,7 @@ module Synacor (main) where
 
 import Control.Monad (ap,liftM)
 import Data.Bits (Bits,(.&.),(.|.),complement)
-import Data.Char (chr)
+import Data.Char (chr,ord)
 import Data.Map (Map)
 import Data.Word (Word16)
 import Prelude hiding (Word)
@@ -36,7 +36,8 @@ wordsOfString = \case
 data Sem a where
   Return :: a -> Sem a
   Bind :: Sem a -> (a -> Sem b) -> Sem b
-  Output :: Word -> Sem ()
+  Input :: Sem Char
+  Output :: Char -> Sem ()
   Log :: String -> Sem ()
   GetPC :: Sem Word
   SetPC :: Word -> Sem ()
@@ -56,6 +57,7 @@ data State = State
   , mem :: Map Number Word
   , regs :: Map Reg Word
   , stack :: [Word]
+  , inp :: String
   }
 
 execute :: [Word] -> IO ()
@@ -69,10 +71,11 @@ execute ws = do
       , mem = Map.fromList (zip [0..] ws)
       , regs = Map.empty
       , stack = []
+      , inp = ""
       }
 
     loop :: State -> Sem a -> IO (a,State)
-    loop s@State{pc,mem,regs,stack} = \case
+    loop s@State{pc,mem,regs,stack,inp} = \case
       Return x -> pure (x,s)
       Bind sem f -> loop s sem >>= \(v,s) -> loop s (f v)
 
@@ -80,8 +83,16 @@ execute ws = do
         putStrLn str
         pure ((),s)
 
-      Output a -> do
-        putStr (outputString a)
+      Input -> do
+        case inp of
+          c:inp -> pure (c,s { inp })
+          [] -> do
+            getLine >>= \case
+              [] -> pure ('\n',s { inp = "" })
+              c:inp -> pure (c,s { inp = inp ++ "\n" })
+
+      Output c -> do
+        putStr [c]
         hFlush stdout
         pure ((),s)
 
@@ -107,11 +118,6 @@ execute ws = do
         case stack of
           [] -> error "empty-stack"
           w:stack -> pure (w, s {stack})
-
-    outputString :: Word -> String
-    outputString w = do
-      if w==10 || (w >= 32 && w < 128) then [chr (fromIntegral w)] else
-        "Number(" ++ show w ++ ")"
 
 --[semantics]---------------------------------------------------------
 
@@ -151,7 +157,7 @@ decode = \case
   17 -> Call <$> arg
   18 -> pure Ret
   19 -> Out <$> arg
-  20 -> error "op-20" --  input
+  20 -> Inp <$> reg
   21 -> pure Noop
   w -> error (show ("decode: unknown op-code",w))
   where
@@ -179,6 +185,7 @@ data Op
   | Call Arg
   | Ret
   | Out Arg
+  | Inp Reg
   | Noop
   deriving Show
 
@@ -249,7 +256,12 @@ exec = \case
 
   Out a -> do
     w <- eval a
-    Output w
+    Output (word2char w)
+    pure Continue
+
+  Inp a -> do
+    c <- Input
+    SetReg a (fromIntegral (ord c))
     pure Continue
 
   Call a -> do
@@ -297,3 +309,8 @@ w2n :: Word -> Number
 w2n w = do
   let w' = m15 w
   if w /= w' then error (show ("w2n",w)) else Number w
+
+word2char :: Word -> Char
+word2char w = do
+  if w==10 || (w >= 32 && w < 128) then chr (fromIntegral w) else
+    error (show ("word2char",w))
