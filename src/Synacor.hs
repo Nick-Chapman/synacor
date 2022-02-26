@@ -1,4 +1,4 @@
-module Top (main) where
+module Synacor (main) where
 
 import Control.Monad (ap,liftM)
 import Data.Bits (Bits,(.&.),(.|.),complement)
