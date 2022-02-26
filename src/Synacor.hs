@@ -17,7 +17,6 @@ main :: IO ()
 main = do
   ws <- load "challenge.bin"
   execute ws
-  pure ()
 
 load :: FilePath -> IO [Word]
 load path = do
@@ -37,32 +36,31 @@ wordsOfString = \case
 data Sem a where
   Return :: a -> Sem a
   Bind :: Sem a -> (a -> Sem b) -> Sem b
-  Output :: Number -> Sem ()
+  Output :: Word -> Sem ()
   Log :: String -> Sem ()
-  GetPC :: Sem Number
-  SetPC :: Number -> Sem ()
-  GetReg :: Reg -> Sem Number
-  SetReg :: Reg -> Number -> Sem ()
-  ReadMem :: Number -> Sem Word
-  WriteMem :: Number -> Word -> Sem ()
-  PushStack :: Number -> Sem ()
-  PopStack :: Sem Number
+  GetPC :: Sem Word
+  SetPC :: Word -> Sem ()
+  GetReg :: Reg -> Sem Word
+  SetReg :: Reg -> Word -> Sem ()
+  ReadMem :: Word -> Sem Word
+  WriteMem :: Word -> Word -> Sem ()
+  PushStack :: Word -> Sem ()
+  PopStack :: Sem Word
 
 instance Functor Sem where fmap = liftM
 instance Applicative Sem where pure = return; (<*>) = ap
 instance Monad Sem where return = Return; (>>=) = Bind
 
 data State = State
-  { pc :: Number
+  { pc :: Word
   , mem :: Map Number Word
-  , regs :: Map Reg Number
-  , stack :: [Number]
+  , regs :: Map Reg Word
+  , stack :: [Word]
   }
 
 execute :: [Word] -> IO ()
 execute ws = do
   ((),_) <- loop state0 (semantics 1)
-  putStrLn "*execute done*"
   pure ()
 
   where
@@ -82,35 +80,36 @@ execute ws = do
         putStrLn str
         pure ((),s)
 
-      Output n -> do
-        putStr (outputStringOfNumber n)
+      Output a -> do
+        putStr (outputString a)
         hFlush stdout
         pure ((),s)
 
       GetPC -> pure (pc,s)
       SetPC pc -> pure ((), s { pc })
 
-      ReadMem n ->
-        pure (maybe (error (show ("ReadMem",()))) id $ Map.lookup n mem, s)
+      ReadMem a ->
+        pure (maybe (error (show ("ReadMem",()))) id $ Map.lookup (w2n a) mem, s)
 
-      WriteMem n w ->
-        pure ((), s { mem = Map.insert n w mem })
+      WriteMem a b ->
+        pure ((), s { mem = Map.insert (w2n a) b mem })
 
-      GetReg r ->
-        pure (maybe 0 id $ Map.lookup r regs, s) -- init regs to 0
+      GetReg a ->
+        pure (maybe 0 id $ Map.lookup a regs, s) -- init regs to 0
 
-      SetReg r n ->
-        pure ((), s { regs = Map.insert r n regs })
+      SetReg a b ->
+        pure ((), s { regs = Map.insert a b regs })
 
-      PushStack n ->
-        pure ((), s { stack = n : stack })
+      PushStack a ->
+        pure ((), s { stack = a : stack })
 
-      PopStack{} -> do
+      PopStack -> do
         case stack of
           [] -> error "empty-stack"
-          n:stack -> pure (n, s {stack})
+          w:stack -> pure (w, s {stack})
 
-    outputStringOfNumber (Number w) =
+    outputString :: Word -> String
+    outputString w = do
       if w==10 || (w >= 32 && w < 128) then [chr (fromIntegral w)] else
         "Number(" ++ show w ++ ")"
 
@@ -205,18 +204,22 @@ exec :: Op -> Sem Flow
 exec = \case
   Halt -> pure Stop
   Set r a -> do v <- eval a; SetReg r v; pure Continue
-  Push a -> do v <- eval a; PushStack v; pure Continue
+  Push a -> do w <- eval a; PushStack w; pure Continue
   Pop r -> do PopStack >>= SetReg r; pure Continue
   Eq a b c -> binop (\n1 n2 -> if n1 == n2 then 1 else 0) a b c
   Gt a b c -> binop (\n1 n2 -> if n1 > n2 then 1 else 0) a b c
-  Jmp a -> do v <- eval a; SetPC v; pure Continue
+  Jmp a -> do w <- eval a; SetPC w; pure Continue
   Jt a b -> do
     n <- eval a
-    if n /= 0 then eval b >>= SetPC else pure ()
+    if n == 0 then pure () else do
+      w <- eval b
+      SetPC w
     pure Continue
   Jf a b -> do
     n <- eval a
-    if n == 0 then eval b >>= SetPC else pure ()
+    if n /= 0 then pure () else do
+      w <- eval b
+      SetPC w
     pure Continue
 
   Add a b c -> binop (+) a b c
@@ -227,22 +230,27 @@ exec = \case
 
   Not a b -> do
     n <- eval b
-    SetReg a (complement n)
+    let n' = complement n
+    --Log (show ("Not",n,n'))
+    SetReg a n'
     pure Continue
 
   Rmem a b -> do
-    n <- eval b
-    w <- ReadMem n
-    SetReg a (word2number w)
+    w1 <- eval b
+    w2 <- ReadMem w1
+    SetReg a w2
     pure Continue
 
   Wmem a b -> do
-    n1 <- eval a
-    n2 <- eval b
-    WriteMem n1 (number2word n2)
+    w1 <- eval a
+    w2 <- eval b
+    WriteMem w1 w2
     pure Continue
 
-  Out a -> do v <- eval a; Output v; pure Continue
+  Out a -> do
+    w <- eval a
+    Output w
+    pure Continue
 
   Call a -> do
     GetPC >>= PushStack
@@ -262,18 +270,19 @@ exec = \case
       SetReg a (f n1 n2)
       pure Continue
 
-eval :: Arg -> Sem Number
+eval :: Arg -> Sem Word
 eval = \case
-  ALit v -> pure v
-  AReg r -> GetReg r
+  ALit n -> pure (n2w n)
+  AReg r -> m15 <$> GetReg r
 
 --[numbers]-----------------------------------------------------------
 
-newtype Number = Number Word -- 15 bit numbers/addresses
-  deriving (Real,Integral,Bits,Show,Enum)
+-- 15-bit numbers, represented as a 16-bit word with an indeterminate top bit
+newtype Number = Number Word16
+  deriving (Show,Enum,Bits,Num,Integral,Real)
 
 m15 :: Word -> Word
-m15 w = w `mod` 32768
+m15 w = w `mod` m where m = 2 ^ (15 :: Word)
 
 instance Eq Number where
   (==) (Number a) (Number b) = (m15 a) == (m15 b)
@@ -281,18 +290,10 @@ instance Eq Number where
 instance Ord Number where
   (<=) (Number a) (Number b) = (m15 a) <= (m15 b)
 
-instance Num Number where
-  fromInteger i = do
-    if i < 0 || i >= 32768 then error (show ("Number.fromInteger",i)) else
-      Number (fromInteger i)
-  (+) (Number a) (Number b) = Number (m15 (a+b))
-  (*) (Number a) (Number b) = Number (m15 (a*b))
-  abs = undefined
-  negate = undefined
-  signum = undefined
+n2w :: Number -> Word
+n2w (Number w) = m15 w
 
-number2word :: Number -> Word
-number2word = fromIntegral
-
-word2number :: Word -> Number
-word2number = fromIntegral
+w2n :: Word -> Number
+w2n w = do
+  let w' = m15 w
+  if w /= w' then error (show ("w2n",w)) else Number w
