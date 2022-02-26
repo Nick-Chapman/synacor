@@ -62,7 +62,7 @@ data State = State
 
 execute :: [Word] -> IO ()
 execute ws = do
-  ((),_) <- loop state0 (semantics 1)
+  ((),_) <- loop state0 semantics
   pure ()
 
   where
@@ -121,13 +121,120 @@ execute ws = do
 
 --[semantics]---------------------------------------------------------
 
-semantics :: Int -> Sem ()
-semantics i = do
-  op <- (fetch >>= decode)
-  --Log ("exec(" ++ show i ++ "): " ++ show op)
-  exec op >>= \case
-    Stop -> Log "*halt*"
-    Continue -> semantics (i+1)
+data Op
+  = Halt
+  | Set Reg Arg
+  | Push Arg
+  | Pop Reg
+  | Eq Reg Arg Arg
+  | Gt Reg Arg Arg
+  | Jmp Arg
+  | Jt Arg Arg
+  | Jf Arg Arg
+  | Add Reg Arg Arg
+  | Mult Reg Arg Arg
+  | Mod Reg Arg Arg
+  | And Reg Arg Arg
+  | Or Reg Arg Arg
+  | Not Reg Arg
+  | Rmem Reg Arg
+  | Wmem Arg Arg
+  | Call Arg
+  | Ret
+  | Out Arg
+  | Inp Reg
+  | Noop
+  deriving Show
+
+data Arg = AReg Reg | ALit Number
+  deriving Show
+
+data Reg = Reg Word
+  deriving (Eq,Ord,Show)
+
+semantics :: Sem ()
+semantics = loop 1
+  where
+    loop :: Int -> Sem ()
+    loop i = do
+      op <- (fetch >>= decode)
+      --Log ("exec(" ++ show i ++ "): " ++ show op)
+      case op of
+        Halt -> Log "*halt*"
+        _ -> do
+          exec op
+          loop (i+1)
+
+exec :: Op -> Sem ()
+exec = \case
+  Halt -> undefined
+  Set r a -> do v <- eval a; SetReg r v
+  Push a -> do w <- eval a; PushStack w
+  Pop r -> do PopStack >>= SetReg r
+  Eq a b c -> binop (\n1 n2 -> if n1 == n2 then 1 else 0) a b c
+  Gt a b c -> binop (\n1 n2 -> if n1 > n2 then 1 else 0) a b c
+  Jmp a -> do w <- eval a; SetPC w
+  Jt a b -> do
+    n <- eval a
+    if n == 0 then pure () else do
+      w <- eval b
+      SetPC w
+  Jf a b -> do
+    n <- eval a
+    if n /= 0 then pure () else do
+      w <- eval b
+      SetPC w
+
+  Add a b c -> binop (+) a b c
+  Mult a b c -> binop (*) a b c
+  Mod a b c -> binop (mod) a b c
+  And a b c -> binop (.&.) a b c
+  Or a b c -> binop (.|.) a b c
+
+  Not a b -> do
+    n <- eval b
+    let n' = complement n
+    --Log (show ("Not",n,n'))
+    SetReg a n'
+
+  Rmem a b -> do
+    w1 <- eval b
+    w2 <- ReadMem w1
+    SetReg a w2
+
+  Wmem a b -> do
+    w1 <- eval a
+    w2 <- eval b
+    WriteMem w1 w2
+
+  Out a -> do
+    w <- eval a
+    Output (word2char w)
+
+  Inp a -> do
+    c <- Input
+    SetReg a (fromIntegral (ord c))
+
+  Call a -> do
+    GetPC >>= PushStack
+    eval a >>= SetPC
+
+  Ret -> do
+    PopStack >>= SetPC
+
+  Noop -> pure ()
+
+  where
+    binop f a b c = do
+      n1 <- eval b
+      n2 <- eval c
+      SetReg a (f n1 n2)
+
+eval :: Arg -> Sem Word
+eval = \case
+  ALit n -> pure (n2w n)
+  AReg r -> m15 <$> GetReg r
+
 
 fetch :: Sem Word
 fetch = do
@@ -164,37 +271,6 @@ decode = \case
     arg = decodeArg <$> fetch
     reg = decodeReg <$> fetch
 
-data Op
-  = Halt
-  | Set Reg Arg
-  | Push Arg
-  | Pop Reg
-  | Eq Reg Arg Arg
-  | Gt Reg Arg Arg
-  | Jmp Arg
-  | Jt Arg Arg
-  | Jf Arg Arg
-  | Add Reg Arg Arg
-  | Mult Reg Arg Arg
-  | Mod Reg Arg Arg
-  | And Reg Arg Arg
-  | Or Reg Arg Arg
-  | Not Reg Arg
-  | Rmem Reg Arg
-  | Wmem Arg Arg
-  | Call Arg
-  | Ret
-  | Out Arg
-  | Inp Reg
-  | Noop
-  deriving Show
-
-data Arg = AReg Reg | ALit Number
-  deriving Show
-
-data Reg = Reg Word
-  deriving (Eq,Ord,Show)
-
 decodeReg :: Word -> Reg
 decodeReg w = case decodeArg w of AReg r -> r; ALit{} -> error (show ("reg",w))
 
@@ -204,88 +280,6 @@ decodeArg w =
     let n = w - 32768
     if n < 8 then AReg (Reg n) else
       error (show ("arg",w))
-
-data Flow = Stop | Continue
-
-exec :: Op -> Sem Flow
-exec = \case
-  Halt -> pure Stop
-  Set r a -> do v <- eval a; SetReg r v; pure Continue
-  Push a -> do w <- eval a; PushStack w; pure Continue
-  Pop r -> do PopStack >>= SetReg r; pure Continue
-  Eq a b c -> binop (\n1 n2 -> if n1 == n2 then 1 else 0) a b c
-  Gt a b c -> binop (\n1 n2 -> if n1 > n2 then 1 else 0) a b c
-  Jmp a -> do w <- eval a; SetPC w; pure Continue
-  Jt a b -> do
-    n <- eval a
-    if n == 0 then pure () else do
-      w <- eval b
-      SetPC w
-    pure Continue
-  Jf a b -> do
-    n <- eval a
-    if n /= 0 then pure () else do
-      w <- eval b
-      SetPC w
-    pure Continue
-
-  Add a b c -> binop (+) a b c
-  Mult a b c -> binop (*) a b c
-  Mod a b c -> binop (mod) a b c
-  And a b c -> binop (.&.) a b c
-  Or a b c -> binop (.|.) a b c
-
-  Not a b -> do
-    n <- eval b
-    let n' = complement n
-    --Log (show ("Not",n,n'))
-    SetReg a n'
-    pure Continue
-
-  Rmem a b -> do
-    w1 <- eval b
-    w2 <- ReadMem w1
-    SetReg a w2
-    pure Continue
-
-  Wmem a b -> do
-    w1 <- eval a
-    w2 <- eval b
-    WriteMem w1 w2
-    pure Continue
-
-  Out a -> do
-    w <- eval a
-    Output (word2char w)
-    pure Continue
-
-  Inp a -> do
-    c <- Input
-    SetReg a (fromIntegral (ord c))
-    pure Continue
-
-  Call a -> do
-    GetPC >>= PushStack
-    eval a >>= SetPC
-    pure Continue
-
-  Ret -> do
-    PopStack >>= SetPC
-    pure Continue
-
-  Noop -> pure Continue
-
-  where
-    binop f a b c = do
-      n1 <- eval b
-      n2 <- eval c
-      SetReg a (f n1 n2)
-      pure Continue
-
-eval :: Arg -> Sem Word
-eval = \case
-  ALit n -> pure (n2w n)
-  AReg r -> m15 <$> GetReg r
 
 --[numbers]-----------------------------------------------------------
 
